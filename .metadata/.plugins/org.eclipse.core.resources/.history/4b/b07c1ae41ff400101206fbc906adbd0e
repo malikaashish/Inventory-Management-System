@@ -1,0 +1,212 @@
+package com.inventory.service;
+
+import com.inventory.dto.request.AdminUserCreateRequest;
+import com.inventory.dto.request.AdminUserUpdateRequest;
+import com.inventory.entity.Role;
+import com.inventory.entity.User;
+import com.inventory.exception.BadRequestException;
+import com.inventory.exception.ResourceNotFoundException;
+import com.inventory.exception.UnauthorizedException;
+import com.inventory.repository.RoleRepository;
+import com.inventory.repository.UserRepository;
+import com.inventory.security.SecurityUtils;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.*;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final UserRepository users;
+    private final RoleRepository roles;
+    private final PasswordEncoder encoder;
+    private final SecurityUtils securityUtils;
+
+    // --- ADMIN METHODS ---
+
+    @Transactional(readOnly = true)
+    public Page<User> getAll(Pageable pageable) {
+        // CHANGED: Returns only active users. Deleted users disappear from the UI.
+        return users.findByIsActiveTrue(pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public User getById(Long id) {
+        return users.findById(id).orElseThrow(() -> new ResourceNotFoundException("User not found: " + id));
+    }
+
+    @Transactional(readOnly = true)
+    public List<User> getByRole(String roleName) {
+        return users.findByRoleName(roleName);
+    }
+
+    @Transactional
+    public User create(AdminUserCreateRequest req) {
+        Role role = roles.findById(req.getRoleId())
+                .orElseThrow(() -> new BadRequestException("Invalid roleId"));
+
+        // Single Admin Policy
+        if (role.getName().equals("ADMIN")) {
+            long adminCount = users.findByRoleName("ADMIN").size();
+            if (adminCount >= 1) {
+                throw new BadRequestException("System policy allows only one Admin. Cannot create another.");
+            }
+        }
+
+        if (users.existsByEmail(req.getEmail())) {
+            throw new BadRequestException("Email already exists");
+        }
+
+        User u = User.builder()
+                .email(req.getEmail())
+                .passwordHash(encoder.encode(req.getPassword()))
+                .firstName(req.getFirstName())
+                .lastName(req.getLastName())
+                .phone(req.getPhone())
+                .department(req.getDepartment())
+                .teamSizeLimit(req.getTeamSizeLimit() != null ? req.getTeamSizeLimit() : 4)
+                .role(role)
+                .isActive(true)
+                .build();
+
+        return users.save(u);
+    }
+
+    @Transactional
+    public User update(Long id, AdminUserUpdateRequest req) {
+        User u = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("User not found: " + id));
+
+        if (!u.getEmail().equals(req.getEmail()) && users.existsByEmail(req.getEmail())) {
+            throw new BadRequestException("Email already exists");
+        }
+
+        Role role = roles.findById(req.getRoleId()).orElseThrow(() -> new BadRequestException("Invalid roleId"));
+
+        if (u.getRole().getName().equals("ADMIN") && !role.getName().equals("ADMIN")) {
+             throw new BadRequestException("Cannot demote the only Admin.");
+        }
+
+        u.setEmail(req.getEmail());
+        u.setFirstName(req.getFirstName());
+        u.setLastName(req.getLastName());
+        u.setPhone(req.getPhone());
+        u.setDepartment(req.getDepartment());
+        u.setRole(role);
+        
+        if (req.getTeamSizeLimit() != null) {
+            u.setTeamSizeLimit(req.getTeamSizeLimit());
+        }
+
+        if (req.getPassword() != null && !req.getPassword().isBlank()) {
+            u.setPasswordHash(encoder.encode(req.getPassword()));
+        }
+
+        return users.save(u);
+    }
+
+    @Transactional
+    public void activate(Long id) {
+        User u = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("User not found: " + id));
+        u.setIsActive(true);
+        users.save(u);
+    }
+
+    @Transactional
+    public void deactivate(Long id) {
+        User u = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("User not found: " + id));
+        if (u.getRole().getName().equals("ADMIN")) {
+            throw new BadRequestException("Cannot deactivate the System Admin.");
+        }
+        u.setIsActive(false);
+        users.save(u);
+    }
+
+    @Transactional
+    public void softDelete(Long id) {
+        // Protect Super Admin explicitly by Email
+        User u = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("User not found"));
+        if ("admin@inventory.com".equalsIgnoreCase(u.getEmail())) {
+            throw new BadRequestException("Cannot delete the Super Admin.");
+        }
+        
+        // Mark inactive (Virtual Delete)
+        u.setIsActive(false);
+        users.save(u);
+    }
+
+    // --- INVENTORY STAFF METHODS ---
+
+    @Transactional(readOnly = true)
+    public List<User> getMyTeam() {
+        User manager = securityUtils.getCurrentUser();
+        // Filters by active in repo query logic if needed, but here we just get by ID
+        return users.findByManagerId(manager.getId());
+    }
+
+    @Transactional
+    public User createTeamMember(AdminUserCreateRequest req) {
+        User manager = securityUtils.getCurrentUser();
+        
+        List<User> team = users.findByManagerId(manager.getId());
+        int limit = manager.getTeamSizeLimit() != null ? manager.getTeamSizeLimit() : 4;
+        long activeCount = team.stream().filter(User::getIsActive).count();
+        
+        if (activeCount >= limit) {
+            throw new BadRequestException("Team limit reached. Your limit is " + limit + " active members.");
+        }
+
+        if (users.existsByEmail(req.getEmail())) throw new BadRequestException("Email exists");
+
+        Role salesRole = roles.findByName("SALES_EXECUTIVE")
+                .orElseThrow(() -> new BadRequestException("Sales role config error"));
+
+        User u = User.builder()
+                .email(req.getEmail())
+                .passwordHash(encoder.encode(req.getPassword()))
+                .firstName(req.getFirstName())
+                .lastName(req.getLastName())
+                .phone(req.getPhone())
+                .department(manager.getDepartment())
+                .role(salesRole)
+                .manager(manager)
+                .isActive(true)
+                .build();
+
+        return users.save(u);
+    }
+
+    @Transactional
+    public User updateTeamMember(Long id, AdminUserUpdateRequest req) {
+        User currentUser = securityUtils.getCurrentUser();
+        User member = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("Member not found"));
+
+        if (!member.getManager().getId().equals(currentUser.getId())) {
+            throw new UnauthorizedException("Not your team member");
+        }
+
+        member.setFirstName(req.getFirstName());
+        member.setLastName(req.getLastName());
+        member.setPhone(req.getPhone());
+        // Email/Password updates ignored for staff managing team
+
+        return users.save(member);
+    }
+
+    @Transactional
+    public void deleteTeamMember(Long id) {
+        User manager = securityUtils.getCurrentUser();
+        User member = users.findById(id).orElseThrow(() -> new ResourceNotFoundException("Member not found"));
+
+        if (member.getManager() == null || !member.getManager().getId().equals(manager.getId())) {
+            throw new UnauthorizedException("You can only remove your own team members.");
+        }
+
+        member.setIsActive(false);
+        users.save(member);
+    }
+}

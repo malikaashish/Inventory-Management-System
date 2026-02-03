@@ -1,0 +1,273 @@
+package com.inventory.service;
+
+import com.inventory.dto.response.DashboardResponse;
+import com.inventory.dto.response.DashboardResponse.*; // Import inner DTOs
+import com.inventory.entity.Product;
+import com.inventory.entity.SalesOrder;
+import com.inventory.entity.User;
+import com.inventory.repository.ProductRepository;
+import com.inventory.repository.SalesOrderRepository;
+import com.inventory.security.SecurityUtils;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class DashboardService {
+
+    private final ProductRepository products;
+    private final SalesOrderRepository salesOrders;
+    private final SecurityUtils securityUtils;
+
+    @Transactional(readOnly = true)
+    public DashboardResponse getDashboard(String range) {
+        User user = securityUtils.getCurrentUser();
+        String dept = (user.getRole().getName().equals("INVENTORY_STAFF")) ? user.getDepartment() : null;
+
+        return DashboardResponse.builder()
+                .inventoryMetrics(buildInventoryMetrics(dept))
+                .salesMetrics(buildSalesMetrics(dept))
+                .lowStockItems(buildLowStockList(dept))
+                .recentOrders(buildRecentOrders(dept))
+                .salesChart(buildChartData(range, dept))
+                .departmentSales(buildPieChartData()) // Dept share is always global or 100% self
+                .productSales(buildProductSalesData(dept))
+                .underPerformingProducts(buildUnderPerformingData(dept))
+                .expiringSoon(buildExpiringList(dept))
+                .deadStock(buildDeadStockList(dept))
+                .build();
+    }
+
+    // 1. SALES METRICS
+    private DashboardResponse.SalesMetrics buildSalesMetrics(String dept) {
+        LocalDateTime startOfDay = LocalDate.now().atStartOfDay();
+        LocalDateTime startOfMonth = LocalDate.now().withDayOfMonth(1).atStartOfDay();
+
+        Integer todayOrders, monthOrders;
+        BigDecimal todayRevenue, monthRevenue;
+
+        if (dept != null) {
+            todayOrders = salesOrders.countNonCancelledSinceByDept(startOfDay, dept);
+            todayRevenue = salesOrders.sumRevenueSinceByDept(startOfDay, dept);
+            monthOrders = salesOrders.countNonCancelledSinceByDept(startOfMonth, dept);
+            monthRevenue = salesOrders.sumRevenueSinceByDept(startOfMonth, dept);
+        } else {
+            todayOrders = salesOrders.countNonCancelledSince(startOfDay);
+            todayRevenue = salesOrders.sumRevenueSince(startOfDay);
+            monthOrders = salesOrders.countNonCancelledSince(startOfMonth);
+            monthRevenue = salesOrders.sumRevenueSince(startOfMonth);
+        }
+
+        BigDecimal avg = BigDecimal.ZERO;
+        if (monthOrders != null && monthOrders > 0 && monthRevenue != null) {
+            avg = monthRevenue.divide(BigDecimal.valueOf(monthOrders), 2, RoundingMode.HALF_UP);
+        }
+
+        return DashboardResponse.SalesMetrics.builder()
+                .totalOrdersToday(todayOrders == null ? 0 : todayOrders)
+                .revenueToday(todayRevenue == null ? BigDecimal.ZERO : todayRevenue)
+                .totalOrdersThisMonth(monthOrders == null ? 0 : monthOrders)
+                .revenueThisMonth(monthRevenue == null ? BigDecimal.ZERO : monthRevenue)
+                .averageOrderValueThisMonth(avg)
+                .build();
+    }
+
+    // 2. CHART DATA (Line/Bar Chart)
+    private List<DashboardResponse.ChartData> buildChartData(String range, String dept) {
+        LocalDateTime startDate = switch (range.toLowerCase()) {
+            case "week" -> LocalDateTime.now().minusWeeks(1);
+            case "month" -> LocalDateTime.now().minusMonths(1);
+            case "year" -> LocalDateTime.now().minusYears(1);
+            default -> LocalDateTime.now().minusDays(1);
+        };
+
+        List<Object[]> results;
+        boolean isYear = "year".equalsIgnoreCase(range);
+
+        if (dept != null) {
+            results = isYear 
+                ? salesOrders.findSalesStatsByMonthByDept(startDate, dept)
+                : salesOrders.findSalesStatsByDateRangeByDept(startDate, dept);
+        } else {
+            results = isYear
+                ? salesOrders.findSalesStatsByMonth(startDate)
+                : salesOrders.findSalesStatsByDateRange(startDate);
+        }
+
+        return results.stream().map(row -> {
+            String dateKey;
+            if (isYear) {
+                int y = ((Number) row[0]).intValue();
+                int m = ((Number) row[1]).intValue();
+                dateKey = String.format("%d-%02d", y, m);
+                return DashboardResponse.ChartData.builder()
+                        .date(dateKey)
+                        .orderCount(((Number) row[2]).intValue())
+                        .revenue((BigDecimal) row[3])
+                        .build();
+            } else {
+                return DashboardResponse.ChartData.builder()
+                        .date(row[0].toString())
+                        .orderCount(((Number) row[1]).intValue())
+                        .revenue((BigDecimal) row[2])
+                        .build();
+            }
+        }).collect(Collectors.toList());
+    }
+
+    // 3. PRODUCT PIE CHARTS
+    private List<ProductPieChartData> buildProductSalesData(String dept) {
+        List<Object[]> results = (dept != null) 
+            ? salesOrders.findTopSellingProductsByDept(dept) 
+            : salesOrders.findTopSellingProducts();
+        return mapToPieList(results);
+    }
+
+    private List<ProductPieChartData> buildUnderPerformingData(String dept) {
+        List<Object[]> results = (dept != null) 
+            ? salesOrders.findLeastSellingProductsByDept(dept) 
+            : salesOrders.findLeastSellingProducts();
+        return mapToPieList(results);
+    }
+
+    private List<ProductPieChartData> mapToPieList(List<Object[]> results) {
+        return results.stream().map(row -> ProductPieChartData.builder()
+                .productName(row[0] != null ? row[0].toString() : "Unknown")
+                .totalSold(((Number) row[1]).longValue())
+                .build()
+        ).collect(Collectors.toList());
+    }
+
+    // 4. RECENT ORDERS
+    private List<DashboardResponse.RecentOrder> buildRecentOrders(String dept) {
+        List<SalesOrder> recent;
+        if (dept != null) {
+            recent = salesOrders.findTop10ByDepartmentOrderByOrderDateDesc(dept, PageRequest.of(0, 10));
+        } else {
+            recent = salesOrders.findTop10ByOrderByOrderDateDesc();
+        }
+
+        return recent.stream()
+                .map(o -> DashboardResponse.RecentOrder.builder()
+                        .orderId(o.getId())
+                        .orderNumber(o.getOrderNumber())
+                        .customerName(o.getCustomer() != null ? o.getCustomer().getName() : "Walk-in")
+                        .totalAmount(o.getTotalAmount())
+                        .status(o.getStatus() != null ? o.getStatus().name() : null)
+                        .orderDate(o.getOrderDate() != null ? o.getOrderDate().toString() : null)
+                        .build())
+                .collect(Collectors.toList());
+    }
+
+    // 5. INVENTORY METRICS
+    private DashboardResponse.InventoryMetrics buildInventoryMetrics(String dept) {
+        int totalProducts;
+        int totalQty;
+        int outOfStock;
+        BigDecimal totalValue;
+        Integer lowStockCount;
+
+        if (dept != null) {
+            List<Product> deptProducts = products.findByCategoryName(dept, Pageable.unpaged()).getContent();
+            totalProducts = deptProducts.size();
+            totalQty = deptProducts.stream().mapToInt(p -> p.getQuantityOnHand() == null ? 0 : p.getQuantityOnHand()).sum();
+            outOfStock = (int) deptProducts.stream().filter(p -> (p.getQuantityOnHand() == null ? 0 : p.getQuantityOnHand()) == 0).count();
+            totalValue = products.calculateTotalInventoryValueByDept(dept);
+            lowStockCount = products.countLowStockProductsByDept(dept);
+        } else {
+            List<Product> all = products.findByIsActiveTrue();
+            totalProducts = all.size();
+            totalQty = all.stream().mapToInt(p -> p.getQuantityOnHand() == null ? 0 : p.getQuantityOnHand()).sum();
+            outOfStock = (int) all.stream().filter(p -> (p.getQuantityOnHand() == null ? 0 : p.getQuantityOnHand()) == 0).count();
+            totalValue = products.calculateTotalInventoryValue();
+            lowStockCount = products.countLowStockProducts();
+        }
+
+        if (totalValue == null) totalValue = BigDecimal.ZERO;
+        if (lowStockCount == null) lowStockCount = 0;
+
+        return DashboardResponse.InventoryMetrics.builder()
+                .totalProducts(totalProducts)
+                .totalQuantity(totalQty)
+                .totalInventoryValue(totalValue)
+                .lowStockCount(lowStockCount)
+                .outOfStockCount(outOfStock)
+                .build();
+    }
+
+    // 6. ALERTS (Low Stock, Expiring, Dead)
+    private List<DashboardResponse.LowStockItem> buildLowStockList(String dept) {
+        List<Product> lowStock = products.findLowStockProducts();
+        if (dept != null) {
+            lowStock = filterProductsByDept(lowStock, dept);
+        }
+        return lowStock.stream()
+                .limit(10)
+                .map(p -> DashboardResponse.LowStockItem.builder()
+                        .productId(p.getId())
+                        .sku(p.getSku())
+                        .productName(p.getName())
+                        .currentStock(p.getQuantityOnHand())
+                        .reorderPoint(p.getReorderPoint())
+                        .build())
+                .collect(Collectors.toList());
+    }
+
+    private List<ExpiringItem> buildExpiringList(String dept) {
+        LocalDate today = LocalDate.now();
+        LocalDate nextMonth = today.plusDays(30);
+        List<Product> list = products.findExpiringSoon(today, nextMonth);
+        if (dept != null) list = filterProductsByDept(list, dept);
+
+        return list.stream().limit(5).map(p -> ExpiringItem.builder()
+                .id(p.getId())
+                .name(p.getName())
+                .sku(p.getSku())
+                .expiryDate(p.getExpiryDate().toString())
+                .daysRemaining((int) ChronoUnit.DAYS.between(today, p.getExpiryDate()))
+                .build())
+                .collect(Collectors.toList());
+    }
+
+    private List<DeadStockItem> buildDeadStockList(String dept) {
+        LocalDateTime oneMonthAgo = LocalDateTime.now().minusDays(30);
+        List<Product> list = products.findDeadStock(oneMonthAgo, PageRequest.of(0, 50));
+        if (dept != null) list = filterProductsByDept(list, dept);
+
+        return list.stream().limit(5).map(p -> DeadStockItem.builder()
+                .id(p.getId())
+                .name(p.getName())
+                .sku(p.getSku())
+                .currentStock(p.getQuantityOnHand())
+                .category(p.getCategory() != null ? p.getCategory().getName() : "-")
+                .build())
+                .collect(Collectors.toList());
+    }
+
+    // Helper Filter
+    private List<Product> filterProductsByDept(List<Product> list, String dept) {
+        return list.stream()
+                .filter(p -> p.getCategory() != null && p.getCategory().getName().equals(dept))
+                .collect(Collectors.toList());
+    }
+
+    // Department Share Pie (Remains Global usually, or just 100% for specific dept)
+    private List<DashboardResponse.PieChartData> buildPieChartData() {
+        return salesOrders.findSalesByDepartment().stream().map(row -> DashboardResponse.PieChartData.builder()
+                .name(row[0] != null ? row[0].toString() : "Unassigned")
+                .value((BigDecimal) row[1])
+                .build()
+        ).collect(Collectors.toList());
+    }
+}

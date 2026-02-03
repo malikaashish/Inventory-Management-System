@@ -1,0 +1,40 @@
+package com.inventory.controller;
+
+import com.inventory.dto.request.LoginRequest;
+import com.inventory.dto.request.RegisterRequest;
+import com.inventory.dto.response.ApiResponse;
+import com.inventory.dto.response.JwtResponse;
+import com.inventory.service.AuthService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final AuthService auth;
+
+    @PostMapping("/login")
+    public ResponseEntity<ApiResponse<JwtResponse>> login(@Valid @RequestBody LoginRequest req) {
+        return ResponseEntity.ok(ApiResponse.success("Login successful", auth.login(req)));
+    }
+
+    @PostMapping("/register")
+    public ResponseEntity<ApiResponse<JwtResponse>> register(@Valid @RequestBody RegisterRequest req) {
+        return ResponseEntity.ok(ApiResponse.success("Registration successful", auth.register(req)));
+    }
+
+    @PostMapping("/refresh")
+    public ResponseEntity<ApiResponse<JwtResponse>> refresh(@RequestParam String refreshToken) {
+        return ResponseEntity.ok(ApiResponse.success("Token refreshed", auth.refresh(refreshToken)));
+    }
+
+    @PostMapping("/logout")
+    public ResponseEntity<ApiResponse<Void>> logout(@RequestParam String refreshToken) {
+        auth.logout(refreshToken);
+        return ResponseEntity.ok(ApiResponse.success("Logged out", null));
+    }
+}

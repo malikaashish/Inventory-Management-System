@@ -1,0 +1,117 @@
+package com.inventory.repository;
+
+import com.inventory.entity.Product;
+import jakarta.persistence.LockModeType; // <--- ADDED
+import org.springframework.data.domain.Page; // <--- ADDED
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
+public interface ProductRepository extends JpaRepository<Product, Long>, JpaSpecificationExecutor<Product> {
+
+    Optional<Product> findBySku(String sku);
+    boolean existsBySku(String sku);
+
+    List<Product> findByIsActiveTrue();
+
+    Page<Product> findByIsActiveTrue(Pageable pageable);
+
+    @Query("SELECT p FROM Product p WHERE p.isActive = true AND p.quantityOnHand <= p.reorderPoint")
+    List<Product> findLowStockProducts();
+
+    @Query("SELECT p FROM Product p WHERE p.isActive = true AND p.quantityOnHand = 0")
+    List<Product> findOutOfStockProducts();
+
+    @Query("SELECT p FROM Product p WHERE p.isActive = true AND p.expiryDate < CURRENT_DATE AND p.quantityOnHand > 0")
+    List<Product> findExpiredProducts();
+
+    @Query("SELECT p FROM Product p WHERE p.isActive = true AND p.expiryDate BETWEEN :today AND :thirtyDaysLater ORDER BY p.expiryDate ASC")
+    List<Product> findExpiringSoon(@Param("today") LocalDate today, @Param("thirtyDaysLater") LocalDate thirtyDaysLater);
+
+    @Query("""
+        SELECT p FROM Product p 
+        WHERE p.isActive = true 
+        AND p.quantityOnHand > 0
+        AND p.id NOT IN (
+            SELECT DISTINCT i.product.id 
+            FROM SalesOrderItem i 
+            JOIN i.salesOrder o 
+            WHERE o.orderDate >= :cutoffDate 
+            AND o.status <> com.inventory.entity.SalesOrder$OrderStatus.CANCELLED
+        )
+    """)
+    List<Product> findDeadStock(@Param("cutoffDate") LocalDateTime cutoffDate, Pageable pageable);
+
+    @Query("SELECT p FROM Product p WHERE p.category.id = :categoryId AND p.isActive = true")
+    List<Product> findByCategoryId(@Param("categoryId") Long categoryId);
+
+    @Query("""
+        SELECT DISTINCT p
+        FROM Product p
+        JOIN p.productSuppliers ps
+        WHERE ps.supplier.id = :supplierId AND p.isActive = true
+    """)
+    List<Product> findBySupplierId(@Param("supplierId") Long supplierId);
+
+    @Query("""
+        SELECT p FROM Product p
+        WHERE (LOWER(p.name) LIKE LOWER(CONCAT('%', :search, '%')) OR
+               LOWER(p.sku) LIKE LOWER(CONCAT('%', :search, '%')))
+          AND p.isActive = true
+    """)
+    Page<Product> searchProducts(@Param("search") String search, Pageable pageable);
+
+    @Query("""
+        SELECT p FROM Product p 
+        JOIN p.category c
+        WHERE c.name = :departmentName AND p.isActive = true
+    """)
+    Page<Product> findByCategoryName(@Param("departmentName") String departmentName, Pageable pageable);
+
+    @Query("""
+        SELECT p FROM Product p 
+        JOIN p.category c
+        WHERE c.name = :departmentName
+          AND p.isActive = true
+          AND (LOWER(p.name) LIKE LOWER(CONCAT('%', :search, '%')) 
+               OR LOWER(p.sku) LIKE LOWER(CONCAT('%', :search, '%')))
+    """)
+    Page<Product> searchByCategoryName(@Param("departmentName") String departmentName, @Param("search") String search, Pageable pageable);
+
+    @Query("SELECT COALESCE(SUM(p.quantityOnHand * p.costPrice), 0) FROM Product p WHERE p.isActive = true")
+    BigDecimal calculateTotalInventoryValue();
+
+    @Query("SELECT COUNT(p) FROM Product p WHERE p.isActive = true AND p.quantityOnHand <= p.reorderPoint")
+    Integer countLowStockProducts();
+
+    @Query("SELECT COUNT(p) FROM Product p JOIN p.category c WHERE c.name = :dept AND p.isActive = true")
+    Integer countActiveProductsByDept(@Param("dept") String dept);
+
+    @Query("SELECT COALESCE(SUM(p.quantityOnHand * p.costPrice), 0) FROM Product p JOIN p.category c WHERE c.name = :dept AND p.isActive = true")
+    BigDecimal calculateTotalInventoryValueByDept(@Param("dept") String dept);
+
+    @Query("SELECT COUNT(p) FROM Product p JOIN p.category c WHERE c.name = :dept AND p.isActive = true AND p.quantityOnHand <= p.reorderPoint")
+    Integer countLowStockProductsByDept(@Param("dept") String dept);
+
+    @Modifying
+    @Query("UPDATE Product p SET p.quantityOnHand = COALESCE(p.quantityOnHand, 0) + :quantity WHERE p.id = :productId")
+    void increaseStock(@Param("productId") Long productId, @Param("quantity") Integer quantity);
+
+    @Modifying
+    @Query("""
+        UPDATE Product p
+        SET p.quantityOnHand = COALESCE(p.quantityOnHand, 0) - :quantity
+        WHERE p.id = :productId AND COALESCE(p.quantityOnHand, 0) >= :quantity
+    """)
+    int decreaseStock(@Param("productId") Long productId, @Param("quantity") Integer quantity);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT p FROM Product p WHERE p.id = :id")
+    Optional<Product> findByIdForUpdate(@Param("id") Long id);
+}

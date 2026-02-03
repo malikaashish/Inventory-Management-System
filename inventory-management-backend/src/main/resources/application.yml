@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: inventory-management-saas
+
+  profiles:
+    active: dev
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/inventory_management_saas?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:Bhanu@143}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties: 
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+app:
+  cors:
+    allowed-origins: "http://localhost:5173,http://localhost:3000"
+
+jwt:
+  # IMPORTANT: set real secret in env JWT_SECRET (>= 32 chars for HS256)
+  secret: ${JWT_SECRET:koqWVVoXneivM3oCJJIEkjnV6xHicqUI3DCINAHG6XxwJrQ69mqDUweqVMy8VzsV}
+  expiration: 86400000          # 24h ms
+  refresh-expiration: 604800000 # 7d ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
