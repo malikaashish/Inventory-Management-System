@@ -8,7 +8,7 @@ spring:
   datasource:
     url: jdbc:mysql://localhost:3306/inventory_management_saas?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:Bhanu@143}
+    password: ${DB_PASSWORD:rootpass}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
   jpa:
